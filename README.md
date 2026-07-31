@@ -5,6 +5,8 @@
 
 by **notxcm** · [GitHub 主页](https://github.com/notxcm)
 
+#大陆用户通过网盘下载更快：      https://wwbto.lanzoup.com/b00zytut1a        密码:bv7j
+
 ---
 
 ## ✨ 核心特性
