@@ -1,0 +1,22 @@
+#include "resource.h"
+// 本文件为 UTF-8 编码，显式指定代码页，防止 windres 按系统 ANSI 解释导致中文乱码
+#pragma code_page(65001)
+
+/* 程序图标 + 清单（UTF-8 / 高 DPI / 主题控件） */
+IDI_ICON ICON "icon.ico"
+IDR_BG  PNG "bg_blur.png"
+IDR_AVATAR RCDATA "7788.jpg"
+1 RT_MANIFEST "app.manifest"
+
+/* ===================== Surprise 惊喜窗口 =====================
+   极简外观：只有一个输入框。开关在主界面 Surprise 按钮旁的「必选」复选框 */
+IDD_SURPRISE DIALOGEX 12, 12, 250, 74
+STYLE 0x80C80048
+CAPTION "Surprise"
+FONT 9, "Microsoft YaHei"
+BEGIN
+    EDITTEXT        IDC_ED_SUP, 12, 10, 226, 20, 0x00010080
+    DEFPUSHBUTTON   "确定", IDOK, 70, 44, 56, 22
+    PUSHBUTTON      "清空", IDC_BTN_SUPCLEAR, 132, 44, 56, 22
+    PUSHBUTTON      "取消", IDCANCEL, 194, 44, 44, 22
+END
