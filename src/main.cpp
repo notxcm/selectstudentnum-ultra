@@ -61,7 +61,7 @@ static ULONGLONG g_animStart = 0;
 static int g_animDur = 1200;
 static std::string g_animResult;
 static std::vector<std::string> g_animList;
-static std::vector<std::string> g_pendingPool, g_pendingRecent, g_pendingMust;
+static std::vector<std::string> g_pendingPool, g_pendingRecent;
 
 static std::mt19937 g_rng(std::random_device{}());
 
@@ -169,7 +169,7 @@ struct App {
     std::vector<std::string> pool;
     std::vector<std::pair<std::string, std::string>> history; // id, time
     std::vector<std::string> recent;
-    std::vector<std::string> mustPick; // Surprise 必抽榜：每次抽取优先命中（按顺序，抽完即出榜）
+    std::vector<std::string> mustPick; // Surprise 必抽榜：每次抽取优先命中（按顺序，永久保存不销毁）
     bool surpriseOn = false;           // Surprise 开关：打勾才生效，不打勾正常抽取
     int animMs = 1200;
     double scaleUI = 1.0;
@@ -587,7 +587,7 @@ static void readQuickSettings() {
 static void doPick() {
     if (g_animActive) return;
     readQuickSettings();
-    if (g_app.pool.empty() && (!g_app.surpriseOn || g_app.mustPick.empty())) {
+    if (g_app.pool.empty()) {
         SetStatus(L"奖池已空，请点「重置」或调整范围/排除。");
         MessageBoxW(g_hwnd, L"当前没有可抽取的学号。\n请检查「设置」面板中的范围、手动添加与排除，或点击「重置」。",
                     L"提示", MB_OK | MB_ICONINFORMATION);
@@ -598,23 +598,25 @@ static void doPick() {
     // 预先计算本次结果（不影响动画期间显示）
     std::vector<std::string> tmpPool = g_app.pool;
     std::vector<std::string> recent = g_app.recent;
-    std::vector<std::string> tmpMust = g_app.mustPick; // 本次抽取消耗的必抽榜副本
     std::vector<std::string> res;
-    int maxAvail = (int)tmpPool.size() + (int)tmpMust.size();
+    int maxAvail = (int)tmpPool.size();
     int n = g_app.unique ? clampv(g_app.nPick, 1, maxAvail) : clampv(g_app.nPick, 1, 9999);
     int k = 0;
-    // Surprise 必抽榜：仅在打勾开启时优先（按顺序先抽榜内数字，抽完即出榜）；不打勾则正常随机
-    while (g_app.surpriseOn && k < n && !tmpMust.empty()) {
-        std::string m = tmpMust.front();
-        tmpMust.erase(tmpMust.begin());
-        res.push_back(m);
-        auto it = std::find(tmpPool.begin(), tmpPool.end(), m);
-        if (it != tmpPool.end()) tmpPool.erase(it);
-        if (g_app.avoidRecent > 0) {
-            recent.push_back(m);
-            while ((int)recent.size() > g_app.avoidRecent) recent.erase(recent.begin());
+    // Surprise 必抽榜：仅在打勾开启时优先（按顺序，仅抽仍在奖池中的数字）；
+    // 必抽榜永久保存，不因抽取而销毁；不打勾则正常随机
+    if (g_app.surpriseOn) {
+        for (const auto& m : g_app.mustPick) {
+            if (k >= n) break;
+            auto it = std::find(tmpPool.begin(), tmpPool.end(), m);
+            if (it == tmpPool.end()) continue; // 已不在奖池（被抽走），跳过
+            res.push_back(m);
+            tmpPool.erase(it);
+            if (g_app.avoidRecent > 0) {
+                recent.push_back(m);
+                while ((int)recent.size() > g_app.avoidRecent) recent.erase(recent.begin());
+            }
+            k++;
         }
-        k++;
     }
     // 其余名额照常随机
     for (; k < n; k++) {
@@ -645,7 +647,6 @@ static void doPick() {
     g_animDur = clampv(g_app.animMs, 300, 10000);
     g_pendingPool = tmpPool;
     g_pendingRecent = recent;
-    g_pendingMust = tmpMust;
     SetTimer(g_hwnd, 1, 40, NULL);
     SetStatus(L"抽取中…");
     updateStats();
@@ -654,7 +655,7 @@ static void doPick() {
 static void finalizePick() {
     g_app.pool = g_pendingPool;
     g_app.recent = g_pendingRecent;
-    g_app.mustPick = g_pendingMust; // 已抽中的必抽榜数字出榜
+    // 必抽榜永久保存，不因抽取而销毁
     std::string t = nowStr();
     for (auto& r : g_animList) g_app.history.push_back({ r, t });
     g_displayText = to_wide(g_animResult);
@@ -977,8 +978,8 @@ static void ApplySettings() {
 
 // ============================== Surprise 惊喜窗口 ==============================
 // 光明正大放在原「设置」位置：极简小窗，输入框填数字（空格分隔多个）。
-// 开关在主界面 Surprise 按钮旁的复选框「必选」控制：打勾则每次抽取第一个
-// 必中榜内数字（按顺序，抽完自动出榜）；不打勾则完全正常抽取。
+// 开关在主界面 Surprise 按钮旁的复选框「必选」控制：打勾则每次抽取优先
+// 命中榜内数字（按顺序，仍在奖池中的才抽）；必抽榜永久保存不销毁；不打勾则完全正常抽取。
 static INT_PTR CALLBACK SurpriseDlg(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_INITDIALOG) {
         std::wstring cur;
