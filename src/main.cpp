@@ -61,7 +61,7 @@ static ULONGLONG g_animStart = 0;
 static int g_animDur = 1200;
 static std::string g_animResult;
 static std::vector<std::string> g_animList;
-static std::vector<std::string> g_pendingPool, g_pendingRecent;
+static std::vector<std::string> g_pendingPool, g_pendingRecent, g_pendingMust;
 
 static std::mt19937 g_rng(std::random_device{}());
 
@@ -169,8 +169,9 @@ struct App {
     std::vector<std::string> pool;
     std::vector<std::pair<std::string, std::string>> history; // id, time
     std::vector<std::string> recent;
-    std::vector<std::string> mustPick; // Surprise 必抽榜：每次抽取优先命中（按顺序，永久保存不销毁）
-    bool surpriseOn = false;           // Surprise 开关：打勾才生效，不打勾正常抽取
+    std::vector<std::string> mustPick;    // Surprise 必抽榜（活跃列表：抽中即出榜，重置时从 mustPickCfg 恢复）
+    std::vector<std::string> mustPickCfg; // Surprise 必抽榜配置（永久保存：重启/重置不丢失）
+    bool surpriseOn = false;              // Surprise 开关：打勾才生效，不打勾正常抽取
     int animMs = 1200;
     double scaleUI = 1.0;
     int theme = 0;
@@ -245,7 +246,7 @@ static void saveConfig(const std::wstring& path) {
              g_app.unique ? 1 : 0, g_app.nPick, g_app.avoidRecent);
     s += b;
     for (auto& h : g_app.history) s += "记录=" + h.first + "|" + h.second + "\n";
-    for (auto& m : g_app.mustPick) s += "必抽榜=" + m + "\n";
+    for (auto& m : g_app.mustPickCfg) s += "必抽榜=" + m + "\n";
     s += std::string("惊喜开关=") + (g_app.surpriseOn ? "1" : "0") + "\n";
     write_file_utf8(path, s, false);
 }
@@ -255,7 +256,7 @@ static bool loadConfig(const std::wstring& path) {
     if (s.empty()) return false;
     App tmp = g_app;
     tmp.ranges.clear(); tmp.manual.clear(); tmp.excluded.clear();
-    tmp.history.clear(); tmp.recent.clear(); tmp.mustPick.clear();
+    tmp.history.clear(); tmp.recent.clear(); tmp.mustPick.clear(); tmp.mustPickCfg.clear();
     for (auto& ln : split_lines(s)) {
         if (ln.empty()) continue;
         size_t eq = ln.find('=');
@@ -286,7 +287,7 @@ static bool loadConfig(const std::wstring& path) {
             if (bar != std::string::npos) { id = trim(val.substr(0, bar)); tm = trim(val.substr(bar + 1)); }
             if (!id.empty()) tmp.history.push_back({ id, tm });
         }
-        else if (key == "必抽榜") { if (!val.empty()) tmp.mustPick.push_back(val); }
+        else if (key == "必抽榜") { if (!val.empty()) { tmp.mustPick.push_back(val); tmp.mustPickCfg.push_back(val); } }
         else if (key == "惊喜开关") { tmp.surpriseOn = (val == "1" || val == "true" || val == "开" || val == "yes" || val == "是"); }
     }
     g_app = tmp;
@@ -599,23 +600,26 @@ static void doPick() {
     std::vector<std::string> tmpPool = g_app.pool;
     std::vector<std::string> recent = g_app.recent;
     std::vector<std::string> res;
+    std::vector<std::string> remainMust; // 本次抽完后剩余的必抽榜（出榜：抽中的移除，未抽中/不在奖池的保留）
     int maxAvail = (int)tmpPool.size();
     int n = g_app.unique ? clampv(g_app.nPick, 1, maxAvail) : clampv(g_app.nPick, 1, 9999);
     int k = 0;
-    // Surprise 必抽榜：仅在打勾开启时优先（按顺序，仅抽仍在奖池中的数字）；
-    // 必抽榜永久保存，不因抽取而销毁；不打勾则正常随机
+    // Surprise 必抽榜：仅在打勾开启时优先（按顺序，仅抽仍在奖池中的数字，抽中即出榜）；
+    // 不在奖池中的必抽榜数字保留在 remainMust，不打勾则正常随机
     if (g_app.surpriseOn) {
         for (const auto& m : g_app.mustPick) {
-            if (k >= n) break;
             auto it = std::find(tmpPool.begin(), tmpPool.end(), m);
-            if (it == tmpPool.end()) continue; // 已不在奖池（被抽走），跳过
-            res.push_back(m);
-            tmpPool.erase(it);
-            if (g_app.avoidRecent > 0) {
-                recent.push_back(m);
-                while ((int)recent.size() > g_app.avoidRecent) recent.erase(recent.begin());
+            if (k < n && it != tmpPool.end()) {
+                res.push_back(m);
+                tmpPool.erase(it);
+                if (g_app.avoidRecent > 0) {
+                    recent.push_back(m);
+                    while ((int)recent.size() > g_app.avoidRecent) recent.erase(recent.begin());
+                }
+                k++;
+            } else {
+                remainMust.push_back(m); // 未抽中或名额已满，保留在活跃列表
             }
-            k++;
         }
     }
     // 其余名额照常随机
@@ -647,6 +651,7 @@ static void doPick() {
     g_animDur = clampv(g_app.animMs, 300, 10000);
     g_pendingPool = tmpPool;
     g_pendingRecent = recent;
+    g_pendingMust = remainMust;
     SetTimer(g_hwnd, 1, 40, NULL);
     SetStatus(L"抽取中…");
     updateStats();
@@ -655,7 +660,7 @@ static void doPick() {
 static void finalizePick() {
     g_app.pool = g_pendingPool;
     g_app.recent = g_pendingRecent;
-    // 必抽榜永久保存，不因抽取而销毁
+    g_app.mustPick = g_pendingMust; // 出榜：抽中的从活跃列表移除，配置 mustPickCfg 不变
     std::string t = nowStr();
     for (auto& r : g_animList) g_app.history.push_back({ r, t });
     g_displayText = to_wide(g_animResult);
@@ -671,8 +676,10 @@ static void finalizePick() {
 }
 
 static void resetPool() {
+    if (g_animActive) { SetStatus(L"动画进行中，请稍候…"); return; }
     buildPool(g_app);
     g_app.recent.clear();
+    g_app.mustPick = g_app.mustPickCfg; // 重置奖池时恢复完整必抽榜
     g_displayText = L"?";
     g_displaySub = L"已重置奖池，点击大卡片或按空格";
     InvalidateDisplay();
@@ -683,6 +690,7 @@ static void resetPool() {
 }
 
 static void undoLast() {
+    if (g_animActive) { SetStatus(L"动画进行中，请稍候…"); return; }
     if (g_app.history.empty()) { SetStatus(L"没有可撤销的记录。"); return; }
     auto last = g_app.history.back();
     g_app.history.pop_back();
@@ -700,6 +708,7 @@ static void undoLast() {
 }
 
 static void clearHistory() {
+    if (g_animActive) { SetStatus(L"动画进行中，请稍候…"); return; }
     if (g_app.history.empty()) { SetStatus(L"记录已经是空的。"); return; }
     if (MessageBoxW(g_hwnd, L"确定要清空所有抽取记录吗？\n（奖池不受影响）", L"确认", MB_YESNO | MB_ICONQUESTION) == IDYES) {
         g_app.history.clear();
@@ -955,6 +964,7 @@ static void syncSettingsPanel() {
 }
 
 static void ApplySettings() {
+    if (g_animActive) { SetStatus(L"动画进行中，请稍候…"); return; }
     std::string rtext = to_utf8(GetWndTextW(g_hEdRanges));
     std::string mtext = to_utf8(GetWndTextW(g_hEdManual));
     std::string etext = to_utf8(GetWndTextW(g_hEdExclude));
@@ -979,13 +989,14 @@ static void ApplySettings() {
 // ============================== Surprise 惊喜窗口 ==============================
 // 光明正大放在原「设置」位置：极简小窗，输入框填数字（空格分隔多个）。
 // 开关在主界面 Surprise 按钮旁的复选框「必选」控制：打勾则每次抽取优先
-// 命中榜内数字（按顺序，仍在奖池中的才抽）；必抽榜永久保存不销毁；不打勾则完全正常抽取。
+// 命中榜内数字（按顺序，仍在奖池中的才抽，抽中即出榜）；必抽榜配置永久保存，
+// 重置奖池或重启后恢复完整列表；不打勾则完全正常抽取。
 static INT_PTR CALLBACK SurpriseDlg(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_INITDIALOG) {
         std::wstring cur;
-        for (size_t i = 0; i < g_app.mustPick.size(); i++) {
+        for (size_t i = 0; i < g_app.mustPickCfg.size(); i++) {
             if (i) cur += L" ";
-            cur += to_wide(g_app.mustPick[i]);
+            cur += to_wide(g_app.mustPickCfg[i]);
         }
         SetWindowTextW(GetDlgItem(h, IDC_ED_SUP), cur.c_str());
         return TRUE;
@@ -996,13 +1007,14 @@ static INT_PTR CALLBACK SurpriseDlg(HWND h, UINT m, WPARAM w, LPARAM l) {
             std::wstring txt = GetWndTextW(GetDlgItem(h, IDC_ED_SUP));
             std::string s = to_utf8(txt);
             g_app.mustPick.clear();
+            g_app.mustPickCfg.clear();
             for (auto& x : split_csv(s)) {
                 std::string t = trim(x);
-                if (!t.empty()) g_app.mustPick.push_back(t);
+                if (!t.empty()) { g_app.mustPick.push_back(t); g_app.mustPickCfg.push_back(t); }
             }
             saveState();
             syncQuickControls();
-            if (g_app.mustPick.empty()) {
+            if (g_app.mustPickCfg.empty()) {
                 SetStatus(L"Surprise 已清空。");
             } else if (g_app.surpriseOn) {
                 SetStatus(L"Surprise 已开启：" + to_wide(g_app.mustPick[0]) + L" 将优先命中。");
@@ -1014,6 +1026,7 @@ static INT_PTR CALLBACK SurpriseDlg(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         if (id == IDC_BTN_SUPCLEAR) {
             g_app.mustPick.clear();
+            g_app.mustPickCfg.clear();
             saveState();
             SetStatus(L"Surprise 已清空。");
             EndDialog(h, 1);
@@ -1231,13 +1244,32 @@ int main() {
     check(g_app.history.size() == 1 && g_app.history[0].first == "005", "history round-trip");
     DeleteFileW(tp.c_str());
 
-    // 必抽榜配置往返
-    g_app = App(); g_app.mustPick.push_back("42"); g_app.mustPick.push_back("7"); g_app.surpriseOn = true;
+    // 必抽榜配置往返（mustPickCfg 永久保存，mustPick 从 mustPickCfg 恢复）
+    g_app = App(); g_app.mustPick.push_back("42"); g_app.mustPick.push_back("7"); g_app.mustPickCfg = g_app.mustPick; g_app.surpriseOn = true;
     saveConfig(tp);
     g_app = App();
     loaded = loadConfig(tp);
-    check(loaded && g_app.mustPick.size() == 2 && g_app.mustPick[0] == "42" && g_app.mustPick[1] == "7", "mustPick round-trip");
+    check(loaded && g_app.mustPickCfg.size() == 2 && g_app.mustPickCfg[0] == "42" && g_app.mustPickCfg[1] == "7", "mustPickCfg round-trip");
+    check(g_app.mustPick.size() == 2 && g_app.mustPick == g_app.mustPickCfg, "mustPick restored from cfg on load");
     check(g_app.surpriseOn, "surpriseOn round-trip");
+    DeleteFileW(tp.c_str());
+
+    // 模拟抽取出榜后 mustPick 减少，但 mustPickCfg 不变；保存后重启恢复
+    g_app = App(); g_app.ranges.push_back({ 1, 10, 1, 0 }); buildPool(g_app);
+    g_app.mustPick.push_back("1"); g_app.mustPick.push_back("2"); g_app.mustPickCfg = g_app.mustPick;
+    g_app.surpriseOn = true; g_app.unique = true; g_app.nPick = 1;
+    // 模拟抽中 "1"：mustPick 出榜
+    g_app.mustPick.erase(g_app.mustPick.begin());
+    auto it1 = std::find(g_app.pool.begin(), g_app.pool.end(), std::string("1"));
+    if (it1 != g_app.pool.end()) g_app.pool.erase(it1);
+    check(g_app.mustPick.size() == 1 && g_app.mustPick[0] == "2", "mustPick consumed after pick");
+    check(g_app.mustPickCfg.size() == 2, "mustPickCfg unchanged after pick");
+    // 保存后重启
+    saveConfig(tp);
+    g_app = App();
+    loaded = loadConfig(tp);
+    check(g_app.mustPickCfg.size() == 2 && g_app.mustPickCfg[0] == "1", "mustPickCfg persists across restart");
+    check(g_app.mustPick.size() == 2, "mustPick restored from cfg on restart");
     DeleteFileW(tp.c_str());
 
     // 音效生成
